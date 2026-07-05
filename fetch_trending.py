@@ -2,20 +2,21 @@
 # -*- coding: utf-8 -*-
 """
 GitHub Trending Weekly Report - Email Sender
-自动获取 GitHub Trending 并发送邮件
-使用 BeautifulSoup 直接解析 GitHub Trending 页面
+自动获取 GitHub Trending 并发送邮件（含中文翻译描述）
 """
 
 import os
 import re
-import json
 import smtplib
 import requests
 from datetime import datetime
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from typing import List, Dict
-from bs4 import BeautifulSoup
+try:
+    from bs4 import BeautifulSoup
+except ImportError:
+    from html.parser import HTMLParser
 
 # 语言颜色映射
 LANGUAGE_COLORS = {
@@ -28,6 +29,38 @@ LANGUAGE_COLORS = {
     'Scala': '#c22d40', 'Elixir': '#6e4a7e', 'Haskell': '#5e5086',
     'Unknown': '#858585'
 }
+
+
+def translate_to_chinese(text: str) -> str:
+    """将英文翻译成中文（使用免费 MyMemory API）"""
+    if not text or not text.strip():
+        return text
+    
+    # 已经包含中文则不翻译
+    if re.search(r'[\u4e00-\u9fff]', text):
+        return text.strip()
+    
+    try:
+        # 使用 MyMemory 免费翻译 API
+        url = "https://api.mymemory.translated.net/get"
+        params = {
+            'q': text,
+            'langpair': 'en|zh-CN'
+        }
+        response = requests.get(url, params=params, timeout=10)
+        data = response.json()
+        
+        translated = data.get('responseData', {}).get('translatedText', '')
+        
+        # 检查翻译是否成功（MyMemory 有时会返回原文）
+        if translated and translated != text and re.search(r'[\u4e00-\u9fff]', translated):
+            return translated.strip()
+        
+        return text.strip()  # 翻译失败返回原文
+        
+    except Exception as e:
+        print(f"⚠️ 翻译失败 ({text[:30]}...): {e}")
+        return text.strip()
 
 
 def fetch_github_trending() -> List[Dict]:
@@ -45,7 +78,6 @@ def fetch_github_trending() -> List[Dict]:
 
     try:
         print("📡 正在获取 GitHub Trending 页面...")
-        # 获取本周 trending
         url = "https://github.com/trending?since=weekly"
         response = requests.get(url, headers=headers, timeout=30)
         response.raise_for_status()
@@ -54,12 +86,10 @@ def fetch_github_trending() -> List[Dict]:
         articles = soup.select('article.Box-row')
 
         if not articles:
-            print("⚠️ 未找到项目列表，尝试备用选择器")
             articles = soup.select('.repo-list-item') or soup.select('li[class*="col-12"]')
 
         for article in articles:
             try:
-                # 项目名称和链接
                 name_tag = article.select_one('h2 a') or article.select_one('h2 > a')
                 if not name_tag:
                     continue
@@ -69,35 +99,29 @@ def fetch_github_trending() -> List[Dict]:
                 href = name_tag.get('href', '')
                 url = f"https://github.com{href}" if href.startswith('/') else href
 
-                # 描述
                 desc_tag = article.select_one('p')
                 description = desc_tag.get_text().strip() if desc_tag else '无描述'
 
-                # 编程语言
                 lang_tag = article.select_one('[itemprop="programmingLanguage"]') or \
                            article.select_one('span[itemprop="programmingLanguage"]')
                 language = lang_tag.get_text().strip() if lang_tag else '未知'
 
-                # 总 Stars - 从链接中提取数字
                 stars_link = article.select_one('a[href*="stargazers"]')
                 total_stars = 0
                 if stars_link:
                     stars_text = stars_link.get_text().strip()
                     total_stars = parse_stars(stars_text)
 
-                # 本周增长 Stars
                 weekly_stars_el = article.select_one('.float-sm-right') or \
                                   article.select_one('[class*="float-right"] span')
                 weekly_stars_text = ''
                 weekly_stars = 0
                 if weekly_stars_el:
                     weekly_stars_text = weekly_stars_el.get_text().strip()
-                    # 提取数字
                     nums = re.findall(r'[\d,]+', weekly_stars_text)
                     if nums:
                         weekly_stars = int(nums[0].replace(',', ''))
 
-                # Forks
                 forks_link = article.select_one('a[href*="forks"]')
                 forks = 0
                 if forks_link:
@@ -115,7 +139,6 @@ def fetch_github_trending() -> List[Dict]:
                     'weekly_stars_text': weekly_stars_text,
                 })
             except Exception as e:
-                print(f"⚠️ 解析单个项目失败: {e}")
                 continue
 
         print(f"✅ 成功解析 {len(projects)} 个项目")
@@ -135,7 +158,7 @@ def parse_stars(text: str) -> int:
 
 
 def generate_html_report(projects: List[Dict]) -> str:
-    """生成 HTML 格式的报告"""
+    """生成 HTML 格式的报告（带中文翻译）"""
     now = datetime.now()
     date_str = now.strftime('%Y年%m月%d日')
 
@@ -149,7 +172,7 @@ def generate_html_report(projects: List[Dict]) -> str:
     html = f"""<!DOCTYPE html>
 <html><head><meta charset="UTF-8">
 <style>
-body {{ font-family: -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;
+body {{ font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;
   line-height:1.6; color:#24292e; max-width:900px; margin:0 auto; padding:20px; background:#f6f8fa; }}
 .header {{ background:linear-gradient(135deg,#667eea 0%,#764ba2 100%); color:#fff;
   padding:30px; border-radius:10px; margin-bottom:30px; text-align:center; }}
@@ -157,13 +180,15 @@ body {{ font-family: -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial
 .project {{ background:#fff; border:1px solid #e1e4e8; border-radius:8px; padding:20px;
   margin-bottom:15px; transition:all .3s; }}
 .project:hover {{ box-shadow:0 4px 12px rgba(0,0,0,.1); transform:translateY(-2px); }}
-.project-header {{ display:flex; justify-content:space-between; align-items:center; margin-bottom:10px; }}
+.project-header {{ display:flex; justify-content:space-between; align-items:center; margin-bottom:10px; flex-wrap:wrap; gap:8px; }}
 .project-name {{ font-size:18px; font-weight:600; color:#0366d6; text-decoration:none; }}
 .project-name:hover {{ text-decoration:underline; }}
-.stars-badge {{ display:flex; align-items:center; gap:15px; }}
+.stars-badge {{ display:flex; align-items:center; gap:15px; flex-wrap:wrap; }}
 .total-stars {{ background:#f1f3f5; padding:5px 12px; border-radius:20px; font-size:14px; color:#586069; }}
 .weekly-stars {{ background:#dafbe1; padding:5px 12px; border-radius:20px; font-size:14px; color:#1a7f37; }}
-.project-desc {{ color:#586069; margin:10px 0; }}
+.desc-original {{ color:#586069; font-size:13px; margin:6px 0; line-height:1.5; }}
+.desc-zh {{ color:#24292e; font-weight:500; font-size:14px; margin:6px 0 10px; line-height:1.5;
+  padding-left:12px; border-left:3px solid #667eea; }}
 .project-meta {{ display:flex; gap:15px; font-size:14px; color:#586069; }}
 .lang-dot {{ width:12px; height:12px; border-radius:50%; display:inline-block; vertical-align:middle; }}
 .section-title {{ font-size:22px; font-weight:600; margin:30px 0 15px; color:#24292e; }}
@@ -178,9 +203,23 @@ body {{ font-family: -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial
 
 <div class="section-title">🏆 本周 TOP {min(len(projects), 15)} 热门项目</div>"""
 
+    print("🔤 正在翻译项目描述...")
     for i, project in enumerate(projects[:15], 1):
         lang_color = LANGUAGE_COLORS.get(project.get('language', ''), LANGUAGE_COLORS['Unknown'])
         weekly_html = f'<span class="weekly-stars">🔥 +{project["weekly_stars"]:,} this week</span>' if project.get('weekly_stars') else ''
+
+        # 翻译描述
+        desc_en = project['description']
+        desc_zh = translate_to_chinese(desc_en)
+
+        if i <= 3:  # 只打印前3个翻译进度
+            print(f"  [{i}/15] {project['name']}: {desc_zh[:40]}...")
+
+        # 如果翻译结果和原文不同，显示双语；否则只显示原文
+        if desc_zh and desc_zh != desc_en:
+            desc_html = f'<div class="desc-original">📝 {desc_en}</div><div class="desc-zh">🇨🇳 {desc_zh}</div>'
+        else:
+            desc_html = f'<div class="desc-zh">{desc_en}</div>'
 
         html += f"""
 <div class="project">
@@ -191,12 +230,14 @@ body {{ font-family: -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial
       {weekly_html}
     </div>
   </div>
-  <div class="project-desc">{project['description']}</div>
+  {desc_html}
   <div class="project-meta">
     <span><span class="lang-dot" style="background:{lang_color}"></span> {project['language']}</span>
     <span>🍴 {project['forks']:,} forks</span>
   </div>
 </div>"""
+
+    print("✅ 翻译完成")
 
     html += f"""
 <div class="trend-section">
