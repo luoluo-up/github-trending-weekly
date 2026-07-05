@@ -3,9 +3,11 @@
 """
 GitHub Trending Weekly Report - Email Sender
 自动获取 GitHub Trending 并发送邮件
+使用 BeautifulSoup 直接解析 GitHub Trending 页面
 """
 
 import os
+import re
 import json
 import smtplib
 import requests
@@ -13,212 +15,225 @@ from datetime import datetime
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from typing import List, Dict
+from bs4 import BeautifulSoup
+
+# 语言颜色映射
+LANGUAGE_COLORS = {
+    'Python': '#3572A5', 'JavaScript': '#f1e05a', 'TypeScript': '#2b7489',
+    'Java': '#b07219', 'Go': '#00ADD8', 'Rust': '#dea584',
+    'C++': '#f34b7d', 'C': '#555555', 'Ruby': '#701516',
+    'Swift': '#F05138', 'Kotlin': '#A97BFF', 'Dart': '#00B4AB',
+    'Shell': '#89e051', 'HTML': '#e34c26', 'CSS': '#563d7c',
+    'Vue': '#41b883', 'R': '#198CE7', 'PHP': '#4F5D95',
+    'Scala': '#c22d40', 'Elixir': '#6e4a7e', 'Haskell': '#5e5086',
+    'Unknown': '#858585'
+}
 
 
 def fetch_github_trending() -> List[Dict]:
-    """获取 GitHub Trending 数据"""
-    url = "https://api.github.com/search/repositories"
-    
-    # 搜索最近一周创建或更新的热门仓库
-    one_week_ago = (datetime.now() - __import__('datetime').timedelta(days=7)).strftime('%Y-%m-%d')
-    
-    params = {
-        'q': f'created:>{one_week_ago} OR pushed:>{one_week_ago}',
-        'sort': 'stars',
-        'order': 'desc',
-        'per_page': 15
+    """通过抓取 GitHub Trending 页面获取数据"""
+
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
+                      '(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.5',
+        'Cache-Control': 'no-cache',
     }
-    
+
+    projects = []
+
     try:
-        response = requests.get(url, params=params, timeout=30)
+        print("📡 正在获取 GitHub Trending 页面...")
+        # 获取本周 trending
+        url = "https://github.com/trending?since=weekly"
+        response = requests.get(url, headers=headers, timeout=30)
         response.raise_for_status()
-        data = response.json()
-        
-        projects = []
-        for item in data.get('items', []):
-            projects.append({
-                'name': item['full_name'],
-                'url': item['html_url'],
-                'description': item['description'] or '无描述',
-                'language': item['language'] or '未知',
-                'total_stars': item['stargazers_count'],
-                'forks': item['forks_count'],
-            })
-        
+
+        soup = BeautifulSoup(response.text, 'html.parser')
+        articles = soup.select('article.Box-row')
+
+        if not articles:
+            print("⚠️ 未找到项目列表，尝试备用选择器")
+            articles = soup.select('.repo-list-item') or soup.select('li[class*="col-12"]')
+
+        for article in articles:
+            try:
+                # 项目名称和链接
+                name_tag = article.select_one('h2 a') or article.select_one('h2 > a')
+                if not name_tag:
+                    continue
+
+                name_parts = [s.strip() for s in name_tag.get_text().strip().split('/') if s.strip()]
+                full_name = '/'.join(name_parts)
+                href = name_tag.get('href', '')
+                url = f"https://github.com{href}" if href.startswith('/') else href
+
+                # 描述
+                desc_tag = article.select_one('p')
+                description = desc_tag.get_text().strip() if desc_tag else '无描述'
+
+                # 编程语言
+                lang_tag = article.select_one('[itemprop="programmingLanguage"]') or \
+                           article.select_one('span[itemprop="programmingLanguage"]')
+                language = lang_tag.get_text().strip() if lang_tag else '未知'
+
+                # 总 Stars - 从链接中提取数字
+                stars_link = article.select_one('a[href*="stargazers"]')
+                total_stars = 0
+                if stars_link:
+                    stars_text = stars_link.get_text().strip()
+                    total_stars = parse_stars(stars_text)
+
+                # 本周增长 Stars
+                weekly_stars_el = article.select_one('.float-sm-right') or \
+                                  article.select_one('[class*="float-right"] span')
+                weekly_stars_text = ''
+                weekly_stars = 0
+                if weekly_stars_el:
+                    weekly_stars_text = weekly_stars_el.get_text().strip()
+                    # 提取数字
+                    nums = re.findall(r'[\d,]+', weekly_stars_text)
+                    if nums:
+                        weekly_stars = int(nums[0].replace(',', ''))
+
+                # Forks
+                forks_link = article.select_one('a[href*="forks"]')
+                forks = 0
+                if forks_link:
+                    forks_text = forks_link.get_text().strip()
+                    forks = parse_stars(forks_text)
+
+                projects.append({
+                    'name': full_name,
+                    'url': url,
+                    'description': description,
+                    'language': language,
+                    'total_stars': total_stars,
+                    'weekly_stars': weekly_stars,
+                    'forks': forks,
+                    'weekly_stars_text': weekly_stars_text,
+                })
+            except Exception as e:
+                print(f"⚠️ 解析单个项目失败: {e}")
+                continue
+
+        print(f"✅ 成功解析 {len(projects)} 个项目")
         return projects
+
     except Exception as e:
         print(f"❌ 获取 GitHub Trending 失败: {e}")
         return []
+
+
+def parse_stars(text: str) -> int:
+    """将 '12.3k' / '1,234' 格式转为整数"""
+    text = text.strip().lower().replace(',', '')
+    if text.endswith('k'):
+        return int(float(text[:-1]) * 1000)
+    return int(re.sub(r'[^\d]', '', text)) if text.replace('.', '').isdigit() else 0
 
 
 def generate_html_report(projects: List[Dict]) -> str:
     """生成 HTML 格式的报告"""
     now = datetime.now()
     date_str = now.strftime('%Y年%m月%d日')
-    
-    html = f"""
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <meta charset="UTF-8">
-        <style>
-            body {{
-                font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
-                line-height: 1.6;
-                color: #24292e;
-                max-width: 900px;
-                margin: 0 auto;
-                padding: 20px;
-                background-color: #f6f8fa;
-            }}
-            .header {{
-                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-                color: white;
-                padding: 30px;
-                border-radius: 10px;
-                margin-bottom: 30px;
-                text-align: center;
-            }}
-            .header h1 {{
-                margin: 0;
-                font-size: 28px;
-            }}
-            .header p {{
-                margin: 10px 0 0 0;
-                opacity: 0.9;
-            }}
-            .project {{
-                background: white;
-                border: 1px solid #e1e4e8;
-                border-radius: 8px;
-                padding: 20px;
-                margin-bottom: 15px;
-                transition: all 0.3s;
-            }}
-            .project:hover {{
-                box-shadow: 0 4px 12px rgba(0,0,0,0.1);
-                transform: translateY(-2px);
-            }}
-            .project-header {{
-                display: flex;
-                justify-content: space-between;
-                align-items: center;
-                margin-bottom: 10px;
-            }}
-            .project-name {{
-                font-size: 18px;
-                font-weight: 600;
-                color: #0366d6;
-                text-decoration: none;
-            }}
-            .project-name:hover {{
-                text-decoration: underline;
-            }}
-            .project-stars {{
-                background: #f1f3f5;
-                padding: 5px 12px;
-                border-radius: 20px;
-                font-size: 14px;
-                color: #586069;
-            }}
-            .project-description {{
-                color: #586069;
-                margin: 10px 0;
-            }}
-            .project-meta {{
-                display: flex;
-                gap: 15px;
-                font-size: 14px;
-                color: #586069;
-            }}
-            .project-language {{
-                display: flex;
-                align-items: center;
-                gap: 5px;
-            }}
-            .language-dot {{
-                width: 12px;
-                height: 12px;
-                border-radius: 50%;
-                background: #f1e05a;
-            }}
-            .footer {{
-                text-align: center;
-                margin-top: 40px;
-                padding: 20px;
-                color: #586069;
-                font-size: 14px;
-            }}
-        </style>
-    </head>
-    <body>
-        <div class="header">
-            <h1>📊 GitHub Trending 周报</h1>
-            <p>{date_str} | 本周最热门的开源项目汇总</p>
-        </div>
-    """
-    
-    for i, project in enumerate(projects, 1):
+
+    # 统计语言分布
+    lang_count = {}
+    for p in projects:
+        lang = p['language']
+        lang_count[lang] = lang_count.get(lang, 0) + 1
+    top_languages = sorted(lang_count.items(), key=lambda x: x[1], reverse=True)[:5]
+
+    html = f"""<!DOCTYPE html>
+<html><head><meta charset="UTF-8">
+<style>
+body {{ font-family: -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;
+  line-height:1.6; color:#24292e; max-width:900px; margin:0 auto; padding:20px; background:#f6f8fa; }}
+.header {{ background:linear-gradient(135deg,#667eea 0%,#764ba2 100%); color:#fff;
+  padding:30px; border-radius:10px; margin-bottom:30px; text-align:center; }}
+.header h1 {{ margin:0; font-size:28px; }} .header p {{ margin:10px 0 0; opacity:.9; }}
+.project {{ background:#fff; border:1px solid #e1e4e8; border-radius:8px; padding:20px;
+  margin-bottom:15px; transition:all .3s; }}
+.project:hover {{ box-shadow:0 4px 12px rgba(0,0,0,.1); transform:translateY(-2px); }}
+.project-header {{ display:flex; justify-content:space-between; align-items:center; margin-bottom:10px; }}
+.project-name {{ font-size:18px; font-weight:600; color:#0366d6; text-decoration:none; }}
+.project-name:hover {{ text-decoration:underline; }}
+.stars-badge {{ display:flex; align-items:center; gap:15px; }}
+.total-stars {{ background:#f1f3f5; padding:5px 12px; border-radius:20px; font-size:14px; color:#586069; }}
+.weekly-stars {{ background:#dafbe1; padding:5px 12px; border-radius:20px; font-size:14px; color:#1a7f37; }}
+.project-desc {{ color:#586069; margin:10px 0; }}
+.project-meta {{ display:flex; gap:15px; font-size:14px; color:#586069; }}
+.lang-dot {{ width:12px; height:12px; border-radius:50%; display:inline-block; vertical-align:middle; }}
+.section-title {{ font-size:22px; font-weight:600; margin:30px 0 15px; color:#24292e; }}
+.lang-bar {{ display:inline-flex; align-items:center; gap:8px; background:#fff; padding:8px 16px;
+  border-radius:20px; border:1px solid #e1e4e8; font-size:14px; }}
+.footer {{ text-align:center; margin-top:40px; padding:20px; color:#586069; font-size:14px; }}
+.trend-section {{ background:#fff; border:1px solid #e1e4e8; border-radius:8px; padding:20px; margin-top:30px; }}
+</style></head><body>
+
+<div class="header"><h1>📊 GitHub Trending 周报</h1>
+<p>{date_str} | 本周最热门的开源项目汇总</p></div>
+
+<div class="section-title">🏆 本周 TOP {min(len(projects), 15)} 热门项目</div>"""
+
+    for i, project in enumerate(projects[:15], 1):
+        lang_color = LANGUAGE_COLORS.get(project.get('language', ''), LANGUAGE_COLORS['Unknown'])
+        weekly_html = f'<span class="weekly-stars">🔥 +{project["weekly_stars"]:,} this week</span>' if project.get('weekly_stars') else ''
+
         html += f"""
-        <div class="project">
-            <div class="project-header">
-                <a href="{project['url']}" class="project-name">
-                    {i}. {project['name']}
-                </a>
-                <span class="project-stars">
-                    ⭐ {project['total_stars']:,}
-                </span>
-            </div>
-            <div class="project-description">
-                {project['description']}
-            </div>
-            <div class="project-meta">
-                <div class="project-language">
-                    <span class="language-dot"></span>
-                    <span>{project['language']}</span>
-                </div>
-                <div>
-                    🍴 {project['forks']:,} forks
-                </div>
-            </div>
-        </div>
-        """
-    
-    html += """
-        <div class="footer">
-            <p>📊 由 GitHub Actions 自动生成 | 数据来源: GitHub API</p>
-            <p>💡 想要自定义周报？访问 <a href="https://github.com">GitHub</a></p>
-        </div>
-    </body>
-    </html>
-    """
-    
+<div class="project">
+  <div class="project-header">
+    <a href="{project['url']}" class="project-name">{i}. {project['name']}</a>
+    <div class="stars-badge">
+      <span class="total-stars">⭐ {project['total_stars']:,}</span>
+      {weekly_html}
+    </div>
+  </div>
+  <div class="project-desc">{project['description']}</div>
+  <div class="project-meta">
+    <span><span class="lang-dot" style="background:{lang_color}"></span> {project['language']}</span>
+    <span>🍴 {project['forks']:,} forks</span>
+  </div>
+</div>"""
+
+    html += f"""
+<div class="trend-section">
+  <div class="section-title">📈 本周趋势分析</div>
+  <p><strong>🔥 热门语言：</strong> """
+
+    html += ' '.join([f'<span class="lang-bar"><span class="lang-dot" style="background:{LANGUAGE_COLORS.get(l, "#888")}"></span>{l} ({c})</span>' for l, c in top_languages])
+
+    html += """</p>
+</div>
+
+<div class="footer">
+<p>📊 由 GitHub Actions 自动生成 | 数据来源: github.com/trending</p>
+<p>💻 仓库: <a href="https://github.com/luoluo-up/github-trending-weekly">github-trending-weekly</a></p>
+</div>
+</body></html>"""
+
     return html
 
 
 def send_email(html_content: str, recipient: str):
     """发送邮件"""
-    # 从环境变量获取邮箱配置
     sender_email = os.environ.get('EMAIL_SENDER', '601119280@qq.com')
-    sender_password = os.environ.get('EMAIL_PASSWORD')  # QQ邮箱授权码
+    sender_password = os.environ.get('EMAIL_PASSWORD')
     smtp_server = os.environ.get('SMTP_SERVER', 'smtp.qq.com')
     smtp_port = int(os.environ.get('SMTP_PORT', '465'))
-    
-    now = datetime.now()
-    date_str = now.strftime('%Y年%m月%d日')
-    
-    # 创建邮件
+
+    date_str = datetime.now().strftime('%Y年%m月%d日')
+
     msg = MIMEMultipart('alternative')
     msg['Subject'] = f'📊 GitHub Trending 周报 - {date_str}'
     msg['From'] = sender_email
     msg['To'] = recipient
-    
-    # HTML 内容
-    html_part = MIMEText(html_content, 'html', 'utf-8')
-    msg.attach(html_part)
-    
+
+    msg.attach(MIMEText(html_content, 'html', 'utf-8'))
+
     try:
-        # 连接 SMTP 服务器并发送
         with smtplib.SMTP_SSL(smtp_server, smtp_port) as server:
             server.login(sender_email, sender_password)
             server.send_message(msg)
@@ -230,43 +245,28 @@ def send_email(html_content: str, recipient: str):
 
 
 def main():
-    """主函数"""
     print("🚀 开始生成 GitHub Trending 周报...")
-    
-    # 获取 Trending 数据
-    print("📡 正在获取 GitHub Trending 数据...")
+
     projects = fetch_github_trending()
-    
+
     if not projects:
-        print("⚠️ 未获取到数据，使用测试数据")
-        projects = [
-            {
-                'name': 'example/project',
-                'url': 'https://github.com',
-                'description': '示例项目',
-                'language': 'Python',
-                'total_stars': 1000,
-                'forks': 100,
-            }
-        ]
-    
+        print("❌ 未获取到任何数据，终止执行")
+        exit(1)
+
     print(f"✅ 成功获取 {len(projects)} 个项目")
-    
-    # 生成 HTML 报告
+
     print("📝 生成 HTML 报告...")
     html_content = generate_html_report(projects)
-    
-    # 保存本地备份
+
     output_file = f"github-trending-{datetime.now().strftime('%Y-%m-%d')}.html"
     with open(output_file, 'w', encoding='utf-8') as f:
         f.write(html_content)
     print(f"💾 报告已保存: {output_file}")
-    
-    # 发送邮件
+
     recipient = os.environ.get('EMAIL_RECIPIENT', '601119280@qq.com')
     print(f"📧 正在发送邮件到 {recipient}...")
     send_email(html_content, recipient)
-    
+
     print("🎉 完成！")
 
 
