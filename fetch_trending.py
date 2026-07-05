@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 GitHub Trending Weekly Report - Email Sender
-自动获取 GitHub Trending 并发送邮件（含中文翻译描述）
+自动获取 GitHub Trending 并发送邮件 + 保存 Markdown 到 Obsidian 仓库
 """
 
 import os
@@ -17,6 +17,8 @@ try:
     from bs4 import BeautifulSoup
 except ImportError:
     from html.parser import HTMLParser
+
+TOP_N = 10  # TOP 10
 
 # 语言颜色映射
 LANGUAGE_COLORS = {
@@ -35,31 +37,25 @@ def translate_to_chinese(text: str) -> str:
     """将英文翻译成中文（使用免费 MyMemory API）"""
     if not text or not text.strip():
         return text
-    
-    # 已经包含中文则不翻译
+
     if re.search(r'[\u4e00-\u9fff]', text):
         return text.strip()
-    
+
     try:
-        # 使用 MyMemory 免费翻译 API
         url = "https://api.mymemory.translated.net/get"
-        params = {
-            'q': text,
-            'langpair': 'en|zh-CN'
-        }
+        params = {'q': text, 'langpair': 'en|zh-CN'}
         response = requests.get(url, params=params, timeout=10)
         data = response.json()
-        
+
         translated = data.get('responseData', {}).get('translatedText', '')
-        
-        # 检查翻译是否成功（MyMemory 有时会返回原文）
+
         if translated and translated != text and re.search(r'[\u4e00-\u9fff]', translated):
             return translated.strip()
-        
-        return text.strip()  # 翻译失败返回原文
-        
+
+        return text.strip()
+
     except Exception as e:
-        print(f"⚠️ 翻译失败 ({text[:30]}...): {e}")
+        print(f"  ⚠️ 翻译失败 ({text[:30]}...): {e}")
         return text.strip()
 
 
@@ -97,7 +93,7 @@ def fetch_github_trending() -> List[Dict]:
                 name_parts = [s.strip() for s in name_tag.get_text().strip().split('/') if s.strip()]
                 full_name = '/'.join(name_parts)
                 href = name_tag.get('href', '')
-                url = f"https://github.com{href}" if href.startswith('/') else href
+                proj_url = f"https://github.com{href}" if href.startswith('/') else href
 
                 desc_tag = article.select_one('p')
                 description = desc_tag.get_text().strip() if desc_tag else '无描述'
@@ -114,8 +110,8 @@ def fetch_github_trending() -> List[Dict]:
 
                 weekly_stars_el = article.select_one('.float-sm-right') or \
                                   article.select_one('[class*="float-right"] span')
-                weekly_stars_text = ''
                 weekly_stars = 0
+                weekly_stars_text = ''
                 if weekly_stars_el:
                     weekly_stars_text = weekly_stars_el.get_text().strip()
                     nums = re.findall(r'[\d,]+', weekly_stars_text)
@@ -130,7 +126,7 @@ def fetch_github_trending() -> List[Dict]:
 
                 projects.append({
                     'name': full_name,
-                    'url': url,
+                    'url': proj_url,
                     'description': description,
                     'language': language,
                     'total_stars': total_stars,
@@ -138,7 +134,7 @@ def fetch_github_trending() -> List[Dict]:
                     'forks': forks,
                     'weekly_stars_text': weekly_stars_text,
                 })
-            except Exception as e:
+            except Exception:
                 continue
 
         print(f"✅ 成功解析 {len(projects)} 个项目")
@@ -158,16 +154,17 @@ def parse_stars(text: str) -> int:
 
 
 def generate_html_report(projects: List[Dict]) -> str:
-    """生成 HTML 格式的报告（带中文翻译）"""
+    """生成 HTML 格式的报告（邮件用，含中文翻译）"""
     now = datetime.now()
     date_str = now.strftime('%Y年%m月%d日')
 
-    # 统计语言分布
     lang_count = {}
     for p in projects:
         lang = p['language']
         lang_count[lang] = lang_count.get(lang, 0) + 1
     top_languages = sorted(lang_count.items(), key=lambda x: x[1], reverse=True)[:5]
+
+    n = min(len(projects), TOP_N)
 
     html = f"""<!DOCTYPE html>
 <html><head><meta charset="UTF-8">
@@ -201,21 +198,19 @@ body {{ font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,
 <div class="header"><h1>📊 GitHub Trending 周报</h1>
 <p>{date_str} | 本周最热门的开源项目汇总</p></div>
 
-<div class="section-title">🏆 本周 TOP {min(len(projects), 15)} 热门项目</div>"""
+<div class="section-title">🏆 本周 TOP {n} 热门项目</div>"""
 
     print("🔤 正在翻译项目描述...")
-    for i, project in enumerate(projects[:15], 1):
+    for i, project in enumerate(projects[:TOP_N], 1):
         lang_color = LANGUAGE_COLORS.get(project.get('language', ''), LANGUAGE_COLORS['Unknown'])
         weekly_html = f'<span class="weekly-stars">🔥 +{project["weekly_stars"]:,} this week</span>' if project.get('weekly_stars') else ''
 
-        # 翻译描述
         desc_en = project['description']
         desc_zh = translate_to_chinese(desc_en)
 
-        if i <= 3:  # 只打印前3个翻译进度
-            print(f"  [{i}/15] {project['name']}: {desc_zh[:40]}...")
+        if i <= 3:
+            print(f"  [{i}/{TOP_N}] {project['name']}: {desc_zh[:40]}...")
 
-        # 如果翻译结果和原文不同，显示双语；否则只显示原文
         if desc_zh and desc_zh != desc_en:
             desc_html = f'<div class="desc-original">📝 {desc_en}</div><div class="desc-zh">🇨🇳 {desc_zh}</div>'
         else:
@@ -251,11 +246,84 @@ body {{ font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,
 
 <div class="footer">
 <p>📊 由 GitHub Actions 自动生成 | 数据来源: github.com/trending</p>
-<p>💻 仓库: <a href="https://github.com/luoluo-up/github-trending-weekly">github-trending-weekly</a></p>
 </div>
 </body></html>"""
 
     return html
+
+
+def generate_markdown_report(projects: List[Dict]) -> str:
+    """生成 Markdown 格式的报告（Obsidian 用，含中文翻译）"""
+    now = datetime.now()
+    date_str = now.strftime('%Y年%m月%d日')
+
+    lang_count = {}
+    for p in projects:
+        lang = p['language']
+        lang_count[lang] = lang_count.get(lang, 0) + 1
+    top_languages = sorted(lang_count.items(), key=lambda x: x[1], reverse=True)[:5]
+
+    n = min(len(projects), TOP_N)
+
+    md = f"""# 📊 GitHub Trending 周报 - {date_str}
+
+> 本周最热门的开源项目汇总 | 数据来源: [github.com/trending](https://github.com/trending?since=weekly)
+
+---
+
+## 🏆 本周 TOP {n} 热门项目
+
+"""
+
+    print("🔤 正在翻译项目描述 (Markdown)...")
+    for i, project in enumerate(projects[:TOP_N], 1):
+        desc_en = project['description']
+        desc_zh = translate_to_chinese(desc_en)
+        weekly_str = f' 🔥 +{project["weekly_stars"]:,} this week' if project.get('weekly_stars') else ''
+
+        md += f"""### {i}. [{project['name']}]({project['url']})
+
+"""
+
+        if desc_zh and desc_zh != desc_en:
+            md += f"""> 📝 {desc_en}
+
+> 🇨🇳 **{desc_zh}**
+
+"""
+        else:
+            md += f"""> {desc_en}
+
+"""
+
+        md += f"""- 🔵 **语言**: {project['language']}
+- ⭐ **总 Stars**: {project['total_stars']:,}{weekly_str}
+- 🍴 **Forks**: {project['forks']:,}
+
+"""
+
+    md += """---
+
+## 📈 本周趋势分析
+
+**🔥 热门语言：**
+
+| 语言 | 项目数 |
+|------|--------|
+"""
+
+    for lang, count in top_languages:
+        md += f"| {lang} | {count} |\n"
+
+    md += f"""
+
+---
+
+> 📊 由 GitHub Actions 自动生成 | {now.strftime('%Y-%m-%d %H:%M')} (UTC)
+
+"""
+
+    return md
 
 
 def send_email(html_content: str, recipient: str):
@@ -285,6 +353,22 @@ def send_email(html_content: str, recipient: str):
         return False
 
 
+def save_markdown_to_obsidian(md_content: str, obsidian_repo_dir: str):
+    """保存 Markdown 到本地 Obsidian 目录结构（后续 push 到 Gitee）"""
+    target_dir = os.path.join(obsidian_repo_dir, '笔记', '技术周报')
+    os.makedirs(target_dir, exist_ok=True)
+
+    date_prefix = datetime.now().strftime('%Y-%m-%d')
+    filename = f'GitHub Trending 周报 - {date_prefix}.md'
+    filepath = os.path.join(target_dir, filename)
+
+    with open(filepath, 'w', encoding='utf-8') as f:
+        f.write(md_content)
+
+    print(f"💾 Markdown 已保存: {filepath}")
+    return filepath
+
+
 def main():
     print("🚀 开始生成 GitHub Trending 周报...")
 
@@ -294,19 +378,38 @@ def main():
         print("❌ 未获取到任何数据，终止执行")
         exit(1)
 
-    print(f"✅ 成功获取 {len(projects)} 个项目")
+    print(f"✅ 成功获取 {len(projects)} 个项目（将取 TOP {TOP_N}）")
 
+    # 1. 生成 HTML 报告（邮件用）
     print("📝 生成 HTML 报告...")
     html_content = generate_html_report(projects)
 
-    output_file = f"github-trending-{datetime.now().strftime('%Y-%m-%d')}.html"
-    with open(output_file, 'w', encoding='utf-8') as f:
+    html_file = f"github-trending-{datetime.now().strftime('%Y-%m-%d')}.html"
+    with open(html_file, 'w', encoding='utf-8') as f:
         f.write(html_content)
-    print(f"💾 报告已保存: {output_file}")
+    print(f"💾 HTML 报告已保存: {html_file}")
 
+    # 2. 生成 Markdown 报告（Obsidian 用）
+    print("📝 生成 Markdown 报告...")
+    md_content = generate_markdown_report(projects)
+
+    md_file = f"github-trending-{datetime.now().strftime('%Y-%m-%d')}.md"
+    with open(md_file, 'w', encoding='utf-8') as f:
+        f.write(md_content)
+    print(f"💾 Markdown 报告已保存: {md_file}")
+
+    # 3. 发送邮件
     recipient = os.environ.get('EMAIL_RECIPIENT', '601119280@qq.com')
     print(f"📧 正在发送邮件到 {recipient}...")
     send_email(html_content, recipient)
+
+    # 4. 如果指定了 Obsidian 仓库目录，同步 Markdown 到笔记/技术周报/
+    obsidian_repo_dir = os.environ.get('OBSIDIAN_REPO_DIR', '')
+    if obsidian_repo_dir:
+        print("📂 同步到 Obsidian 仓库...")
+        save_markdown_to_obsidian(md_content, obsidian_repo_dir)
+    else:
+        print("ℹ️ 未设置 OBSIDIAN_REPO_DIR，跳过 Obsidian 同步")
 
     print("🎉 完成！")
 
