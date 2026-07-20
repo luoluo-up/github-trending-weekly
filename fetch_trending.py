@@ -313,7 +313,7 @@ def upload_to_gitee(md_content: str):
     date_prefix = datetime.now().strftime('%Y-%m-%d')
     filename = f'GitHub Trending 周报 - {date_prefix}.md'
     # Gitee 仓库中文件的完整路径
-    file_path = f'笔记/技术周报/{filename}'
+    file_path = f'技术/技术周报/{filename}'
 
     content_base64 = base64.b64encode(md_content.encode('utf-8')).decode('utf-8')
     commit_message = f'📊 自动更新: GitHub Trending 周报 ({date_prefix})'
