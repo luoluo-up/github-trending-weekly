@@ -33,6 +33,8 @@ jobs:
         SMTP_PORT: ${{ secrets.SMTP_PORT }}
       run: |
         python fetch_trending.py
+        echo "=== 生成后根目录文件 ==="
+        ls -la github-trending-* 2>/dev/null || echo "⚠️ 未生成 github-trending-* 文件"
 
     - name: Sync Markdown to Obsidian Gitee
       env:
@@ -41,17 +43,26 @@ jobs:
         GITEE_BRANCH: ${{ secrets.GITEE_BRANCH }}  # master
       run: |
         echo "📂 开始同步到 Obsidian Gitee 仓库 (技术/技术周报/)..."
+        cd "$GITHUB_WORKSPACE"
+        echo "=== 工作目录全部文件 ==="
+        ls -la
+        echo "=== 查找 md 文件 ==="
+        ls -la github-trending-*.md 2>/dev/null || echo "⚠️ 根目录没有 github-trending-*.md"
+
         git config --global user.email "action@github.com"
         git config --global user.name "GitHub Action"
-
-        # 用带 token 的 URL clone，避免 push 时无凭据
         git clone "https://oauth2:${GITEE_TOKEN}@gitee.com/${GITEE_REPO}.git" obsidian-vault
+
+        mkdir -p "obsidian-vault/技术/技术周报"
+        if ls github-trending-*.md >/dev/null 2>&1; then
+          cp github-trending-*.md "obsidian-vault/技术/技术周报/"
+          echo "✅ 已复制: $(ls obsidian-vault/技术/技术周报/ | grep github-trending)"
+        else
+          echo "❌ 未找到 md 文件，无法同步"
+          exit 1
+        fi
+
         cd obsidian-vault
-
-        mkdir -p "技术/技术周报"
-        cp "../github-trending-*.md" "技术/技术周报/"
-        echo "✅ 已复制: $(ls 技术/技术周报/ | grep github-trending)"
-
         git add "技术/技术周报/"
         if git diff --cached --quiet; then
           echo "ℹ️ 无变更，跳过提交"
