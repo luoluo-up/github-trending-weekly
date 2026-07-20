@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 GitHub Trending Weekly Report - Email + Gitee Sync
-自动获取 GitHub Trending → 发邮件 + 推送到 Gitee Obsidian 仓库
+自动获取 GitHub Trending → 调 GitHub Models 生成中文解读 → 发邮件 + 推送到 Gitee Obsidian 仓库
 """
 
 import os
@@ -21,6 +21,10 @@ except ImportError:
     from html.parser import HTMLParser
 
 TOP_N = 10  # TOP 10
+
+# GitHub Models (GitHub Actions 自带的 GITHUB_TOKEN 即可调用，无需额外 key)
+GITHUB_MODELS_ENDPOINT = "https://models.inference.ai.azure.com/chat/completions"
+EXPLAIN_MODEL = "gpt-4o-mini"
 
 LANGUAGE_COLORS = {
     'Python': '#3572A5', 'JavaScript': '#f1e05a', 'TypeScript': '#2b7489',
@@ -50,6 +54,42 @@ def translate_to_chinese(text: str) -> str:
     except Exception as e:
         print(f"  ⚠️ 翻译失败 ({text[:30]}...): {e}")
         return text.strip()
+
+
+def generate_explanation(project: Dict, token: str) -> str:
+    """调用 GitHub Models (GITHUB_TOKEN) 生成项目中文解读；失败则返回空串（降级为仅翻译）"""
+    if not token:
+        return ""
+    prompt = (
+        "你是一个技术周报编辑。请用简洁专业的中文，为下面的 GitHub 热门开源项目写一段约 90-150 字的解读，"
+        "包含：它是什么（一句话定位）、解决什么痛点、为什么本周受欢迎、适合谁用。"
+        "不要使用标题，写成连贯的一段话，不要啰嗦。\n\n"
+        f"项目名：{project['name']}\n"
+        f"描述：{project['description']}\n"
+        f"主要语言：{project['language']}\n"
+        f"总 Stars：{project['total_stars']:,}\n"
+        f"本周新增 Stars：{project['weekly_stars']:,}"
+    )
+    payload = {
+        "model": EXPLAIN_MODEL,
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0.7,
+        "max_tokens": 400,
+    }
+    try:
+        resp = requests.post(
+            GITHUB_MODELS_ENDPOINT,
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+            json=payload,
+            timeout=45,
+        )
+        if resp.status_code == 200:
+            return resp.json().get("choices", [{}])[0].get("message", {}).get("content", "").strip()
+        print(f"  ⚠️ LLM 解读失败 ({resp.status_code}): {resp.text[:120]}")
+        return ""
+    except Exception as e:
+        print(f"  ⚠️ LLM 解读异常: {e}")
+        return ""
 
 
 def fetch_github_trending() -> List[Dict]:
@@ -106,6 +146,7 @@ def fetch_github_trending() -> List[Dict]:
                     'name': full_name, 'url': proj_url, 'description': description,
                     'language': language, 'total_stars': total_stars,
                     'weekly_stars': weekly_stars, 'forks': forks,
+                    'explanation': '',
                 })
             except Exception:
                 continue
@@ -153,6 +194,8 @@ body {{ font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,
 .desc-original {{ color:#586069; font-size:13px; margin:6px 0; line-height:1.5; }}
 .desc-zh {{ color:#24292e; font-weight:500; font-size:14px; margin:6px 0 10px; line-height:1.5;
   padding-left:12px; border-left:3px solid #667eea; }}
+.desc-explain {{ color:#1f6feb; font-size:13px; margin:8px 0 4px; line-height:1.6; background:#f6f8fa;
+  padding:10px 12px; border-radius:6px; border-left:3px solid #1f6feb; }}
 .project-meta {{ display:flex; gap:15px; font-size:14px; color:#586069; }}
 .lang-dot {{ width:12px; height:12px; border-radius:50%; display:inline-block; vertical-align:middle; }}
 .section-title {{ font-size:22px; font-weight:600; margin:30px 0 15px; color:#24292e; }}
@@ -179,6 +222,8 @@ body {{ font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,
             desc_html = f'<div class="desc-original">📝 {desc_en}</div><div class="desc-zh">🇨🇳 {desc_zh}</div>'
         else:
             desc_html = f'<div class="desc-zh">{desc_en}</div>'
+        explanation = project.get('explanation', '')
+        explain_html = f'<div class="desc-explain">💡 {explanation}</div>' if explanation else ''
         html += f"""
 <div class="project">
   <div class="project-header">
@@ -189,6 +234,7 @@ body {{ font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,
     </div>
   </div>
   {desc_html}
+  {explain_html}
   <div class="project-meta">
     <span><span class="lang-dot" style="background:{lang_color}"></span> {project['language']}</span>
     <span>🍴 {project['forks']:,} forks</span>
@@ -248,10 +294,12 @@ def generate_markdown_report(projects: List[Dict]) -> str:
             md += f"""> {desc_en}
 
 """
+        explanation = project.get('explanation', '')
+        explain_md = f"- 💡 **解读**: {explanation}\n" if explanation else ""
         md += f"""- 🔵 **语言**: {project['language']}
 - ⭐ **总 Stars**: {project['total_stars']:,}{weekly_str}
 - 🍴 **Forks**: {project['forks']:,}
-
+{explain_md}
 """
 
     md += """---
@@ -309,6 +357,16 @@ def main():
         exit(1)
 
     print(f"✅ 成功获取 {len(projects)} 个项目（将取 TOP {TOP_N}）")
+
+    # 0.5 调用 GitHub Models 生成项目解读（需要 GITHUB_TOKEN + models:read 权限）
+    gh_token = os.environ.get('GITHUB_TOKEN', '')
+    if gh_token:
+        print("🤖 调用 GitHub Models 生成项目解读...")
+        for idx, p in enumerate(projects[:TOP_N], 1):
+            print(f"  [{idx}/{TOP_N}] 解读: {p['name']}")
+            p['explanation'] = generate_explanation(p, gh_token)
+    else:
+        print("⚠️ 未检测到 GITHUB_TOKEN，跳过 LLM 解读（仅保留翻译描述）")
 
     # 1. HTML 报告（邮件用）
     print("📝 生成 HTML 报告...")
