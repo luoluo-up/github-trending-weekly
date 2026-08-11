@@ -8,6 +8,8 @@ GitHub Trending Weekly Report - Email + Gitee Sync
 import os
 import re
 import json
+import time
+import random
 import base64
 import smtplib
 import requests
@@ -79,20 +81,31 @@ def generate_explanation(project: Dict, api_key: str) -> str:
             "thinkingConfig": {"thinkingBudget": 0},  # 关闭思考，避免占用输出 token 导致解读被截断
         },
     }
-    try:
-        resp = requests.post(url, json=payload, timeout=45)
-        if resp.status_code == 200:
-            data = resp.json()
-            cand = data.get("candidates", [{}])[0]
-            if cand.get("finishReason") == "SAFETY":
-                print("  ⚠️ Gemini 因安全策略拦截，跳过该解读")
-                return ""
-            return cand.get("content", {}).get("parts", [{}])[0].get("text", "").strip()
-        print(f"  ⚠️ Gemini 解读失败 ({resp.status_code}): {resp.text[:200]}")
-        return ""
-    except Exception as e:
-        print(f"  ⚠️ Gemini 解读异常: {e}")
-        return ""
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            resp = requests.post(url, json=payload, timeout=45)
+            if resp.status_code == 200:
+                data = resp.json()
+                cand = data.get("candidates", [{}])[0]
+                if cand.get("finishReason") == "SAFETY":
+                    print("  ⚠️ Gemini 因安全策略拦截，跳过该解读")
+                    return ""
+                return cand.get("content", {}).get("parts", [{}])[0].get("text", "").strip()
+            # 429 限流 / 5xx 服务端错误 → 指数退避重试
+            if resp.status_code == 429 or resp.status_code >= 500:
+                wait = (2 ** attempt) + random.uniform(0, 1)
+                print(f"  ⚠️ Gemini 返回 {resp.status_code}，{wait:.1f}s 后重试 ({attempt+1}/{max_retries})")
+                time.sleep(wait)
+                continue
+            print(f"  ⚠️ Gemini 解读失败 ({resp.status_code}): {resp.text[:200]}")
+            return ""
+        except Exception as e:
+            wait = (2 ** attempt) + random.uniform(0, 1)
+            print(f"  ⚠️ Gemini 解读异常: {e}，{wait:.1f}s 后重试 ({attempt+1}/{max_retries})")
+            time.sleep(wait)
+    print("  ❌ Gemini 重试耗尽，跳过该解读")
+    return ""
 
 
 def fetch_github_trending() -> List[Dict]:
@@ -368,6 +381,7 @@ def main():
         for idx, p in enumerate(projects[:TOP_N], 1):
             print(f"  [{idx}/{TOP_N}] 解读: {p['name']}")
             p['explanation'] = generate_explanation(p, gemini_key)
+            time.sleep(1)  # 控制请求频率，避免触发 Gemini 免费额度限流
     else:
         print("⚠️ 未检测到 GEMINI_API_KEY，跳过 LLM 解读（仅保留翻译描述）")
 
