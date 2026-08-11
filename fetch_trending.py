@@ -81,7 +81,7 @@ def generate_explanation(project: Dict, api_key: str) -> str:
             "thinkingConfig": {"thinkingBudget": 0},  # 关闭思考，避免占用输出 token 导致解读被截断
         },
     }
-    max_retries = 3
+    max_retries = 5
     for attempt in range(max_retries):
         try:
             resp = requests.post(url, json=payload, timeout=45)
@@ -381,7 +381,7 @@ def main():
         for idx, p in enumerate(projects[:TOP_N], 1):
             print(f"  [{idx}/{TOP_N}] 解读: {p['name']}")
             p['explanation'] = generate_explanation(p, gemini_key)
-            time.sleep(1)  # 控制请求频率，避免触发 Gemini 免费额度限流
+            time.sleep(2)  # 控制请求频率，避免触发 Gemini 免费额度限流
     else:
         print("⚠️ 未检测到 GEMINI_API_KEY，跳过 LLM 解读（仅保留翻译描述）")
 
