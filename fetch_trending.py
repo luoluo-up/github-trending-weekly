@@ -108,6 +108,61 @@ def generate_explanation(project: Dict, api_key: str) -> str:
     return ""
 
 
+def generate_all_explanations(projects: List[Dict], api_key: str) -> bool:
+    """一次调用 Gemini 批量生成全部项目解读（结构化 JSON 返回），按 name 匹配回填。
+    返回 True 表示全部匹配成功；False 表示需降级为逐个调用。失败不抛异常。"""
+    if not api_key or not projects:
+        return False
+    items = "\n".join(
+        f"{i+1}. 项目名：{p['name']}\n   描述：{p['description']}\n"
+        f"   主要语言：{p['language']}\n   总Stars：{p['total_stars']:,}\n   本周新增Stars：{p['weekly_stars']:,}"
+        for i, p in enumerate(projects)
+    )
+    prompt = (
+        "你是一个技术周报编辑。下面列出了 GitHub 本周热门开源项目，请为每个项目写一段约 90-150 字的中文解读，"
+        "包含：它是什么（一句话定位）、解决什么痛点、为什么本周受欢迎、适合谁用。写成连贯的一段话，不要啰嗦。\n\n"
+        "请严格以 JSON 数组格式返回，每个元素形如：\n"
+        '{"name": "owner/repo", "explanation": "解读文本"}\n\n'
+        "只返回 JSON，不要任何额外说明文字、不要 markdown 代码块。项目列表：\n" + items
+    )
+    url = GEMINI_API_ENDPOINT.format(model=EXPLAIN_MODEL) + f"?key={api_key}"
+    payload = {
+        "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+        "generationConfig": {
+            "temperature": 0.7,
+            "maxOutputTokens": 2000,
+            "thinkingConfig": {"thinkingBudget": 0},  # 关闭思考，避免干扰 JSON 输出
+            "responseMimeType": "application/json",   # 要求结构化 JSON 返回
+        },
+    }
+    try:
+        resp = requests.post(url, json=payload, timeout=90)
+        if resp.status_code != 200:
+            print(f"  ⚠️ 批量解读失败 ({resp.status_code}): {resp.text[:200]}")
+            return False
+        data = resp.json()
+        cand = data.get("candidates", [{}])[0]
+        text = cand.get("content", {}).get("parts", [{}])[0].get("text", "").strip()
+        arr = json.loads(text)
+        mapping = {}
+        for item in arr:
+            nm = str(item.get("name", "")).strip().lower()
+            ex = str(item.get("explanation", "")).strip()
+            if nm and ex:
+                mapping[nm] = ex
+        filled = 0
+        for p in projects:
+            key = p["name"].strip().lower()
+            if key in mapping:
+                p["explanation"] = mapping[key]
+                filled += 1
+        print(f"  ✅ 批量解读匹配成功：{filled}/{len(projects)}")
+        return filled == len(projects)
+    except Exception as e:
+        print(f"  ⚠️ 批量解读异常: {e}")
+        return False
+
+
 def fetch_github_trending() -> List[Dict]:
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
@@ -377,11 +432,14 @@ def main():
     # 0.5 调用 Gemini API 生成项目解读（需要 GEMINI_API_KEY）
     gemini_key = os.environ.get('GEMINI_API_KEY', '')
     if gemini_key:
-        print("🤖 调用 Gemini API 生成项目解读...")
-        for idx, p in enumerate(projects[:TOP_N], 1):
-            print(f"  [{idx}/{TOP_N}] 解读: {p['name']}")
-            p['explanation'] = generate_explanation(p, gemini_key)
-            time.sleep(2)  # 控制请求频率，避免触发 Gemini 免费额度限流
+        # 优先批量调用：一次请求生成全部解读，每周只耗 1 次配额，避免撞免费额度墙
+        print("🤖 调用 Gemini API 批量生成项目解读...")
+        if not generate_all_explanations(projects[:TOP_N], gemini_key):
+            print("⚠️ 批量解读未全成功，降级为逐个调用（带重试）...")
+            for idx, p in enumerate(projects[:TOP_N], 1):
+                print(f"  [{idx}/{TOP_N}] 解读: {p['name']}")
+                p['explanation'] = generate_explanation(p, gemini_key)
+                time.sleep(2)  # 控制请求频率，避免触发 Gemini 免费额度限流
     else:
         print("⚠️ 未检测到 GEMINI_API_KEY，跳过 LLM 解读（仅保留翻译描述）")
 
