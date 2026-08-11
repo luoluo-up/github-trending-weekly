@@ -10,8 +10,7 @@ jobs:
   send-report:
     runs-on: ubuntu-latest
     permissions:
-      contents: read
-      models: read   # 允许 GITHUB_TOKEN 调用 GitHub Models 生成项目解读
+      contents: read   # 仅需读取仓库内容（checkout 用）
 
     steps:
     - name: Checkout repository
@@ -34,7 +33,7 @@ jobs:
         EMAIL_RECIPIENT: ${{ secrets.EMAIL_RECIPIENT }}
         SMTP_SERVER: ${{ secrets.SMTP_SERVER }}
         SMTP_PORT: ${{ secrets.SMTP_PORT }}
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}   # 用于调用 GitHub Models 生成解读
+        GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}   # 用于调用 Gemini API 生成中文解读
       run: |
         python fetch_trending.py
         echo "=== 生成后根目录文件 ==="

@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 GitHub Trending Weekly Report - Email + Gitee Sync
-自动获取 GitHub Trending → 调 GitHub Models 生成中文解读 → 发邮件 + 推送到 Gitee Obsidian 仓库
+自动获取 GitHub Trending → 调 Gemini API 生成中文解读 → 发邮件 + 推送到 Gitee Obsidian 仓库
 """
 
 import os
@@ -22,9 +22,9 @@ except ImportError:
 
 TOP_N = 10  # TOP 10
 
-# GitHub Models (GitHub Actions 自带的 GITHUB_TOKEN 即可调用，无需额外 key)
-GITHUB_MODELS_ENDPOINT = "https://models.inference.ai.azure.com/chat/completions"
-EXPLAIN_MODEL = "gpt-4o-mini"
+# Gemini API（需要 GEMINI_API_KEY；模型可改 gemini-1.5-flash / gemini-2.0-flash 等）
+GEMINI_API_ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+EXPLAIN_MODEL = "gemini-2.5-flash"
 
 LANGUAGE_COLORS = {
     'Python': '#3572A5', 'JavaScript': '#f1e05a', 'TypeScript': '#2b7489',
@@ -56,9 +56,9 @@ def translate_to_chinese(text: str) -> str:
         return text.strip()
 
 
-def generate_explanation(project: Dict, token: str) -> str:
-    """调用 GitHub Models (GITHUB_TOKEN) 生成项目中文解读；失败则返回空串（降级为仅翻译）"""
-    if not token:
+def generate_explanation(project: Dict, api_key: str) -> str:
+    """调用 Gemini API 生成项目中文解读；失败则返回空串（降级为仅翻译）"""
+    if not api_key:
         return ""
     prompt = (
         "你是一个技术周报编辑。请用简洁专业的中文，为下面的 GitHub 热门开源项目写一段约 90-150 字的解读，"
@@ -70,25 +70,28 @@ def generate_explanation(project: Dict, token: str) -> str:
         f"总 Stars：{project['total_stars']:,}\n"
         f"本周新增 Stars：{project['weekly_stars']:,}"
     )
+    url = GEMINI_API_ENDPOINT.format(model=EXPLAIN_MODEL) + f"?key={api_key}"
     payload = {
-        "model": EXPLAIN_MODEL,
-        "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0.7,
-        "max_tokens": 400,
+        "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+        "generationConfig": {
+            "temperature": 0.7,
+            "maxOutputTokens": 400,
+            "thinkingConfig": {"thinkingBudget": 0},  # 关闭思考，避免占用输出 token 导致解读被截断
+        },
     }
     try:
-        resp = requests.post(
-            GITHUB_MODELS_ENDPOINT,
-            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-            json=payload,
-            timeout=45,
-        )
+        resp = requests.post(url, json=payload, timeout=45)
         if resp.status_code == 200:
-            return resp.json().get("choices", [{}])[0].get("message", {}).get("content", "").strip()
-        print(f"  ⚠️ LLM 解读失败 ({resp.status_code}): {resp.text[:120]}")
+            data = resp.json()
+            cand = data.get("candidates", [{}])[0]
+            if cand.get("finishReason") == "SAFETY":
+                print("  ⚠️ Gemini 因安全策略拦截，跳过该解读")
+                return ""
+            return cand.get("content", {}).get("parts", [{}])[0].get("text", "").strip()
+        print(f"  ⚠️ Gemini 解读失败 ({resp.status_code}): {resp.text[:200]}")
         return ""
     except Exception as e:
-        print(f"  ⚠️ LLM 解读异常: {e}")
+        print(f"  ⚠️ Gemini 解读异常: {e}")
         return ""
 
 
@@ -358,15 +361,15 @@ def main():
 
     print(f"✅ 成功获取 {len(projects)} 个项目（将取 TOP {TOP_N}）")
 
-    # 0.5 调用 GitHub Models 生成项目解读（需要 GITHUB_TOKEN + models:read 权限）
-    gh_token = os.environ.get('GITHUB_TOKEN', '')
-    if gh_token:
-        print("🤖 调用 GitHub Models 生成项目解读...")
+    # 0.5 调用 Gemini API 生成项目解读（需要 GEMINI_API_KEY）
+    gemini_key = os.environ.get('GEMINI_API_KEY', '')
+    if gemini_key:
+        print("🤖 调用 Gemini API 生成项目解读...")
         for idx, p in enumerate(projects[:TOP_N], 1):
             print(f"  [{idx}/{TOP_N}] 解读: {p['name']}")
-            p['explanation'] = generate_explanation(p, gh_token)
+            p['explanation'] = generate_explanation(p, gemini_key)
     else:
-        print("⚠️ 未检测到 GITHUB_TOKEN，跳过 LLM 解读（仅保留翻译描述）")
+        print("⚠️ 未检测到 GEMINI_API_KEY，跳过 LLM 解读（仅保留翻译描述）")
 
     # 1. HTML 报告（邮件用）
     print("📝 生成 HTML 报告...")
