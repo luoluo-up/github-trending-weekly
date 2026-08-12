@@ -235,7 +235,98 @@ def parse_stars(text: str) -> int:
     return int(re.sub(r'[^\d]', '', text)) if text.replace('.', '').isdigit() else 0
 
 
-def generate_html_report(projects: List[Dict]) -> str:
+def fetch_ai_skills_report() -> List[Dict]:
+    """从 awesome-agent-skills 仓库获取最新 AI/Agent/Skills 周报并解析。
+    任何网络/解析失败都返回空列表，绝不阻断主流程。"""
+    headers = {'User-Agent': 'Mozilla/5.0'}
+    token = os.environ.get('GITHUB_TOKEN')
+    if token:
+        headers['Authorization'] = f'Bearer {token}'
+    for sub in ('weekly', 'daily'):
+        try:
+            api = f"https://api.github.com/repos/Alfie3213/awesome-agent-skills/contents/{sub}"
+            r = requests.get(api, headers=headers, timeout=20)
+            if r.status_code != 200:
+                print(f"  ⚠️ 获取 awesome-agent-skills/{sub} 返回 {r.status_code}，跳过")
+                continue
+            files = [f['name'] for f in r.json() if isinstance(f, dict) and f['name'].endswith('.md')]
+            if not files:
+                continue
+            latest = sorted(files)[-1]
+            raw = requests.get(
+                f"https://raw.githubusercontent.com/Alfie3213/awesome-agent-skills/main/{sub}/{latest}",
+                headers=headers, timeout=20).text
+            print(f"📡 已获取 AI Skills 周报: {sub}/{latest}")
+            return parse_aas_report(raw)
+        except Exception as e:
+            print(f"  ⚠️ 获取 awesome-agent-skills/{sub} 失败: {e}")
+            continue
+    print("⚠️ 未能获取 AI Skills 周报，跳过该板块（不影响主周报）")
+    return []
+
+
+def parse_aas_report(raw: str) -> List[Dict]:
+    """解析 awesome-agent-skills 周报 Markdown：排行榜表格 + 详细介绍。"""
+    lines = raw.splitlines()
+    table_rows = []
+    in_table = False
+    # 1) 排行榜表格
+    for line in lines:
+        s = line.strip()
+        if s.startswith('|') and '排名' in s:
+            in_table = True
+            continue
+        if in_table:
+            if set(s.replace('|', '').strip()) <= set('-: '):
+                continue  # 分隔行
+            if s.startswith('|'):
+                cols = [c.strip() for c in s.strip('|').split('|')]
+                if len(cols) >= 5 and cols[0].isdigit():
+                    table_rows.append(cols)
+            else:
+                in_table = False
+    # 2) 详细介绍（### N. [name](url) ... 直到 **GitHub 链接**）
+    details = {}
+    cur = None
+    buf = []
+    for line in lines:
+        m = re.match(r'^###\s+\d+\.\s+\[([^\]]+)\]\(([^)]+)\)', line.strip())
+        if m:
+            if cur and buf:
+                details[cur] = '\n'.join(buf).strip()
+            cur = m.group(1).strip().lower()
+            buf = []
+        elif line.strip().startswith('**GitHub 链接**') and cur:
+            details[cur] = '\n'.join(buf).strip()
+            cur = None
+            buf = []
+        elif cur is not None:
+            buf.append(line.strip())
+    if cur and buf:
+        details[cur] = '\n'.join(buf).strip()
+
+    projects = []
+    for cols in table_rows:
+        repo_md, stars_s, weekly_s, highlight = cols[1], cols[2], cols[3], cols[4]
+        lm = re.match(r'\[([^\]]+)\]\(([^)]+)\)', repo_md)
+        if not lm:
+            continue
+        name = lm.group(1).strip()
+        url = lm.group(2).strip()
+        total_stars = parse_stars(stars_s)
+        weekly_stars = 0 if ('—' in weekly_s or not weekly_s.strip()) else parse_stars(weekly_s)
+        explanation = details.get(name.lower(), '')
+        projects.append({
+            'name': name, 'url': url, 'description': highlight,
+            'language': 'AI/Skills', 'total_stars': total_stars,
+            'weekly_stars': weekly_stars, 'forks': 0,
+            'explanation': explanation,
+        })
+    print(f"✅ 解析出 {len(projects)} 个 AI/Skills 项目")
+    return projects
+
+
+def generate_html_report(projects: List[Dict], ai_projects: List[Dict] = None) -> str:
     now = datetime.now()
     date_str = now.strftime('%Y年%m月%d日')
     lang_count = {}
@@ -318,17 +409,49 @@ body {{ font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,
   <div class="section-title">📈 本周趋势分析</div>
   <p><strong>🔥 热门语言：</strong> """
     html += ' '.join([f'<span class="lang-bar"><span class="lang-dot" style="background:{LANGUAGE_COLORS.get(l, "#888")}"></span>{l} ({c})</span>' for l, c in top_languages])
+    # ---- AI / Agent / Skills 板块（可选，失败不影响主周报）----
+    ai_html = ""
+    if ai_projects:
+        ai_list = ai_projects[:TOP_N]
+        ai_html += f'<div class="section-title">🤖 本周 AI / Agent / Skills 热门榜 TOP {len(ai_list)}</div>'
+        ai_html += '<p style="color:#586069;font-size:13px;margin:-5px 0 15px;">数据来源：awesome-agent-skills 周报（已附中文解读）</p>'
+        for i, p in enumerate(ai_list, 1):
+            lang_color = '#2dd4bf'
+            if p.get('weekly_stars'):
+                weekly_html = f'<span class="weekly-stars">🔥 +{p["weekly_stars"]:,} this week</span>'
+            else:
+                weekly_html = '<span class="weekly-stars" style="background:#eaeef2;color:#8b949e;">⭐ 本周新增未公布</span>'
+            desc_html = f'<div class="desc-zh">💡 {p["description"]}</div>'
+            explanation = (p.get('explanation') or '').replace('\n', '<br>')
+            explain_html = f'<div class="desc-explain" style="border-left-color:#2dd4bf;">{explanation}</div>' if explanation else ''
+            ai_html += f'''
+<div class="project">
+  <div class="project-header">
+    <a href="{p['url']}" class="project-name">{i}. {p['name']}</a>
+    <div class="stars-badge">
+      <span class="total-stars">⭐ {p['total_stars']:,}</span>
+      {weekly_html}
+    </div>
+  </div>
+  {desc_html}
+  {explain_html}
+  <div class="project-meta">
+    <span><span class="lang-dot" style="background:{lang_color}"></span> AI / Skills</span>
+  </div>
+</div>'''
+
     html += """</p>
 </div>
 
+""" + ai_html + """
 <div class="footer">
-<p>📊 由 GitHub Actions 自动生成 | 数据来源: github.com/trending</p>
+<p>📊 由 GitHub Actions 自动生成 | 数据来源: github.com/trending + awesome-agent-skills</p>
 </div>
 </body></html>"""
     return html
 
 
-def generate_markdown_report(projects: List[Dict]) -> str:
+def generate_markdown_report(projects: List[Dict], ai_projects: List[Dict] = None) -> str:
     now = datetime.now()
     date_str = now.strftime('%Y年%m月%d日')
     lang_count = {}
@@ -385,6 +508,19 @@ def generate_markdown_report(projects: List[Dict]) -> str:
     for lang, count in top_languages:
         md += f"| {lang} | {count} |\n"
 
+    # ---- AI / Agent / Skills 板块（可选）----
+    if ai_projects:
+        ai_list = ai_projects[:TOP_N]
+        md += f"\n---\n\n## 🤖 本周 AI / Agent / Skills 热门榜 TOP {len(ai_list)}\n\n"
+        md += "> 数据来源：awesome-agent-skills 周报（已附中文解读）\n\n"
+        for i, p in enumerate(ai_list, 1):
+            weekly_str = f' 🔥 +{p["weekly_stars"]:,} this week' if p.get('weekly_stars') else ' ⭐ 本周新增未公布'
+            md += f"### {i}. [{p['name']}]({p['url']})\n\n"
+            md += f"> 💡 **{p['description']}**\n\n"
+            if p.get('explanation'):
+                md += f"{p['explanation']}\n\n"
+            md += f"- ⭐ **总 Stars**: {p['total_stars']:,}{weekly_str}\n\n"
+
     md += f"""
 
 ---
@@ -429,6 +565,9 @@ def main():
 
     print(f"✅ 成功获取 {len(projects)} 个项目（将取 TOP {TOP_N}）")
 
+    # 0. 额外获取 AI / Agent / Skills 热门榜（awesome-agent-skills 周报；失败自动跳过，不影响主周报）
+    ai_projects = fetch_ai_skills_report()
+
     # 0.5 调用 Gemini API 生成项目解读（需要 GEMINI_API_KEY）
     gemini_key = os.environ.get('GEMINI_API_KEY', '')
     if gemini_key:
@@ -445,7 +584,7 @@ def main():
 
     # 1. HTML 报告（邮件用）
     print("📝 生成 HTML 报告...")
-    html_content = generate_html_report(projects)
+    html_content = generate_html_report(projects, ai_projects)
     html_file = f"github-trending-{datetime.now().strftime('%Y-%m-%d')}.html"
     with open(html_file, 'w', encoding='utf-8') as f:
         f.write(html_content)
@@ -453,7 +592,7 @@ def main():
 
     # 2. Markdown 报告（Obsidian 用）
     print("📝 生成 Markdown 报告...")
-    md_content = generate_markdown_report(projects)
+    md_content = generate_markdown_report(projects, ai_projects)
     md_file = f"github-trending-{datetime.now().strftime('%Y-%m-%d')}.md"
     with open(md_file, 'w', encoding='utf-8') as f:
         f.write(md_content)
